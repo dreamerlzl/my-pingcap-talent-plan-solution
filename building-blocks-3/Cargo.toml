@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+  "mserver",
+  "mcli",
+  "mbytes",
+  "mserde",
+]
