@@ -3,6 +3,7 @@ use std::fs::{rename, File, OpenOptions};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use bson::Document;
 use serde::{Deserialize, Serialize};
@@ -18,12 +19,20 @@ enum Command {
 
 type FileID = u32;
 
+#[derive(Clone)]
 pub struct KvStore {
+    writer: Arc<Mutex<KvWriter>>,
+
+    log_dir_path: PathBuf,
+}
+
+struct KvWriter {
     buf_writer: BufWriter<File>,
     log_index: HashMap<String, ValuePos>,
-    log_dir_path: PathBuf,
+
     first_file_id: FileID,
     active_file_id: FileID,
+    log_dir_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -57,13 +66,17 @@ impl KvStore {
             .open(active_log_path)?;
         let buf_writer = BufWriter::new(active_log_file);
 
-        let log_dir_path = PathBuf::from(log_dir_path.as_ref().clone());
+        let log_dir_path = PathBuf::from(log_dir_path.as_ref());
         let kvstore = KvStore {
-            buf_writer,
-            log_index,
-            log_dir_path,
-            first_file_id,
-            active_file_id,
+            log_dir_path: log_dir_path.clone(),
+
+            writer: Arc::new(Mutex::new(KvWriter::new(
+                buf_writer,
+                log_index,
+                active_file_id,
+                log_dir_path,
+                first_file_id,
+            ))),
         };
         Ok(kvstore)
     }
@@ -83,7 +96,72 @@ impl KvStore {
     }
 
     // append a command
+
+    // compacts all logs with id <= last_file_id
+    // rebuild the log index
+    // and returns the file id of the last compacted log (in time order)
+}
+
+impl KvsEngine for KvStore {
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let command = Command::Set(key, value);
+        self.writer.lock().unwrap().append_command(command)?;
+        Ok(())
+    }
+
+    fn remove(&self, key: String) -> Result<()> {
+        self.writer.lock().unwrap().remove(key)?;
+        Ok(())
+    }
+
+    fn get(&self, key: String) -> Result<Option<String>> {
+        if let Some(pos) = self.writer.lock().unwrap().get_pos(key)? {
+            Ok(Some(self.read_value(&pos)?))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl KvWriter {
+    fn new(
+        buf_writer: BufWriter<File>,
+        log_index: HashMap<String, ValuePos>,
+        active_file_id: FileID,
+        log_dir_path: PathBuf,
+        first_file_id: FileID,
+    ) -> Self {
+        Self {
+            buf_writer,
+            log_index,
+            first_file_id,
+            active_file_id,
+            log_dir_path,
+        }
+    }
+
+    fn get_pos(&mut self, key: String) -> Result<Option<ValuePos>> {
+        self.buf_writer.flush()?;
+        if let Some(pos) = self.log_index.get(&key) {
+            // dbg!((key, pos));
+            Ok(Some(pos.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        if self.log_index.remove(&key).is_some() {
+            let command = Command::Rm(key);
+            self.append_command(command)?;
+            Ok(())
+        } else {
+            Err(KvsError::KeyNotFound(key))
+        }
+    }
+
     fn append_command(&mut self, command: Command) -> Result<()> {
+        let first_file_id = self.first_file_id;
         let bytes = command_to_bytes(&command)?;
         self.buf_writer.write_all(bytes.as_slice())?;
         let current_size = get_current_pos(&mut self.buf_writer)?;
@@ -110,13 +188,11 @@ impl KvStore {
         Ok(())
     }
 
-    // compacts all logs with id <= last_file_id
-    // rebuild the log index
-    // and returns the file id of the last compacted log (in time order)
     fn compact_logs(&mut self, last_file_id: FileID) -> Result<FileID> {
+        let log_dir_path = &self.log_dir_path;
         let mut kv_snapshot = HashMap::new();
         for i in self.first_file_id..=last_file_id {
-            let log_path = path_from_id(&self.log_dir_path, i);
+            let log_path = path_from_id(log_dir_path, i);
             let file = OpenOptions::new()
                 .read(true)
                 .open(&log_path)
@@ -137,7 +213,7 @@ impl KvStore {
 
         let mut current_log_bytes = 0;
         let mut current_file_id = self.first_file_id;
-        let mut file_path = compact_path_from_id(&self.log_dir_path, current_file_id);
+        let mut file_path = compact_path_from_id(log_dir_path, current_file_id);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -152,11 +228,11 @@ impl KvStore {
             current_log_bytes += bytes.len() as u64;
             if current_log_bytes > CHUNK_SIZE_BYTES {
                 buf_writer.flush()?;
-                rename(file_path, path_from_id(&self.log_dir_path, current_file_id))
+                rename(file_path, path_from_id(log_dir_path, current_file_id))
                     .expect("fail to rename bak to log");
                 current_log_bytes = 0;
                 current_file_id += 1;
-                file_path = compact_path_from_id(&self.log_dir_path, current_file_id);
+                file_path = compact_path_from_id(log_dir_path, current_file_id);
                 let file = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -164,37 +240,9 @@ impl KvStore {
                 buf_writer = BufWriter::new(file);
             }
         }
-        rename(file_path, path_from_id(&self.log_dir_path, current_file_id))
+        rename(file_path, path_from_id(log_dir_path, current_file_id))
             .expect("fail to rename bak to log");
         Ok(current_file_id)
-    }
-}
-
-impl KvsEngine for KvStore {
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        let command = Command::Set(key.clone(), value);
-        self.append_command(command)?;
-        Ok(())
-    }
-
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        self.buf_writer.flush()?;
-        if let Some(pos) = self.log_index.get(&key) {
-            // dbg!((key, pos));
-            Ok(Some(self.read_value(pos)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn remove(&mut self, key: String) -> Result<()> {
-        if let Some(_) = self.log_index.remove(&key) {
-            let command = Command::Rm(key);
-            self.append_command(command)?;
-            Ok(())
-        } else {
-            Err(KvsError::KeyNotFound(key))
-        }
     }
 }
 

@@ -19,7 +19,7 @@ impl SledKvsEngine {
 }
 
 impl KvsEngine for SledKvsEngine {
-    fn get(&mut self, key: String) -> crate::Result<Option<String>> {
+    fn get(&self, key: String) -> crate::Result<Option<String>> {
         Ok(self
             .db
             .get(key)?
@@ -28,13 +28,13 @@ impl KvsEngine for SledKvsEngine {
             .transpose()?)
     }
 
-    fn set(&mut self, key: String, value: String) -> crate::Result<()> {
+    fn set(&self, key: String, value: String) -> crate::Result<()> {
         self.db.insert(key, value.as_bytes()).map(|_| ())?;
         self.db.flush()?;
         Ok(())
     }
 
-    fn remove(&mut self, key: String) -> crate::Result<()> {
+    fn remove(&self, key: String) -> crate::Result<()> {
         self.db.remove(&key)?.ok_or(KvsError::KeyNotFound(key))?;
         self.db.flush()?;
         Ok(())

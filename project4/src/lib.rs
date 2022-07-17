@@ -13,10 +13,10 @@ pub use server::KvsServer;
 pub use sledstore::SledKvsEngine;
 pub use threadpool::{NaiveThreadPool, ThreadPool};
 
-pub trait KvsEngine: Send {
-    fn set(&mut self, key: String, value: String) -> Result<()>;
-    fn get(&mut self, key: String) -> Result<Option<String>>;
-    fn remove(&mut self, key: String) -> Result<()>;
+pub trait KvsEngine: Send + Clone + 'static {
+    fn set(&self, key: String, value: String) -> Result<()>;
+    fn get(&self, key: String) -> Result<Option<String>>;
+    fn remove(&self, key: String) -> Result<()>;
 }
 
 use serde::{Deserialize, Serialize};
