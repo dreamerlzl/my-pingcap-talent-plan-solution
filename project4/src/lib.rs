@@ -11,7 +11,7 @@ pub use kvserror::{KvsError, Result};
 pub use kvstore::KvStore;
 pub use server::KvsServer;
 pub use sledstore::SledKvsEngine;
-pub use threadpool::{NaiveThreadPool, ThreadPool};
+pub use threadpool::{NaiveThreadPool, RayonThreadPool, SharedQueueThreadPool, ThreadPool};
 
 pub trait KvsEngine: Send + Clone + 'static {
     fn set(&self, key: String, value: String) -> Result<()>;

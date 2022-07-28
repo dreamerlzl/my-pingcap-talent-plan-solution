@@ -12,7 +12,8 @@ use tracing::{error, info};
 use tracing_subscriber;
 
 use kvs::{
-    KvStore, KvsEngine, KvsError, KvsServer, NaiveThreadPool, Result, SledKvsEngine, ThreadPool,
+    KvStore, KvsEngine, KvsError, KvsServer, NaiveThreadPool, RayonThreadPool, Result,
+    SharedQueueThreadPool, SledKvsEngine, ThreadPool,
 };
 
 const DEFAULT_ENGINE: &'static str = "kvs";
@@ -81,7 +82,7 @@ fn parse_addr(addr: &str) -> std::result::Result<SocketAddr, AddrParseError> {
 }
 
 fn run_with_engine<E: KvsEngine + 'static>(addr: SocketAddr, engine: E) -> Result<()> {
-    let mut server = KvsServer::new(addr, engine, NaiveThreadPool::new(10)?);
+    let mut server = KvsServer::new(addr, engine, RayonThreadPool::new(10)?);
     server.run()
 }
 
