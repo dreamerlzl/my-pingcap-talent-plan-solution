@@ -5,33 +5,18 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::ThreadPool;
 
 type Job = Box<dyn Send + 'static + FnOnce()>;
-enum Message {
-    Task(Job),
-    Stop,
-}
 
 pub struct SharedQueueThreadPool {
-    msg_send_queue: Sender<Message>,
-    threads: u32,
+    msg_send_queue: Sender<Job>,
 }
 
 pub struct ThreadPoolSharedData {
-    msg_queue: Receiver<Message>,
+    msg_queue: Receiver<Job>,
 }
 
 impl ThreadPoolSharedData {
-    fn new(msg_queue: Receiver<Message>) -> Self {
+    fn new(msg_queue: Receiver<Job>) -> Self {
         Self { msg_queue }
-    }
-}
-
-impl Drop for SharedQueueThreadPool {
-    fn drop(&mut self) {
-        for _ in 0..self.threads {
-            self.msg_send_queue
-                .send(Message::Stop)
-                .expect("fail to send stop signal to tp");
-        }
     }
 }
 
@@ -45,10 +30,7 @@ impl ThreadPool for SharedQueueThreadPool {
         for _ in 0..threads {
             spawn_thread(shared_data.clone());
         }
-        Ok(Self {
-            msg_send_queue: tx,
-            threads,
-        })
+        Ok(Self { msg_send_queue: tx })
     }
 
     fn spawn<F>(&self, job: F)
@@ -56,7 +38,7 @@ impl ThreadPool for SharedQueueThreadPool {
         F: FnOnce() + 'static + Send,
     {
         self.msg_send_queue
-            .send(Message::Task(Box::new(job)))
+            .send(Box::new(job))
             .expect("fail to send job");
     }
 }
@@ -94,10 +76,10 @@ fn spawn_thread(shared_data: Arc<ThreadPoolSharedData>) {
     thread::spawn(move || {
         let mut sentinel = Sentinel::new(shared_data.clone());
         loop {
-            let msg = shared_data.msg_queue.recv().expect("receiver closed");
+            let msg = shared_data.msg_queue.recv();
             match msg {
-                Message::Task(job) => job(),
-                Message::Stop => break,
+                Ok(job) => job(),
+                Err(_) => break,
             }
         }
         sentinel.cancel();
