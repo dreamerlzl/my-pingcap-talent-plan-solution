@@ -3,7 +3,7 @@ use std::fs::{rename, File, OpenOptions};
 use std::io::prelude::*;
 use std::io::{BufReader, BufWriter, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use bson::Document;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ type FileID = u32;
 
 #[derive(Clone)]
 pub struct KvStore {
-    writer: Arc<Mutex<KvWriter>>,
+    writer: Arc<RwLock<KvWriter>>,
 
     log_dir_path: PathBuf,
 }
@@ -70,7 +70,7 @@ impl KvStore {
         let kvstore = KvStore {
             log_dir_path: log_dir_path.clone(),
 
-            writer: Arc::new(Mutex::new(KvWriter::new(
+            writer: Arc::new(RwLock::new(KvWriter::new(
                 buf_writer,
                 log_index,
                 active_file_id,
@@ -105,17 +105,17 @@ impl KvStore {
 impl KvsEngine for KvStore {
     fn set(&self, key: String, value: String) -> Result<()> {
         let command = Command::Set(key, value);
-        self.writer.lock().unwrap().append_command(command)?;
+        self.writer.write().unwrap().append_command(command)?;
         Ok(())
     }
 
     fn remove(&self, key: String) -> Result<()> {
-        self.writer.lock().unwrap().remove(key)?;
+        self.writer.write().unwrap().remove(key)?;
         Ok(())
     }
 
     fn get(&self, key: String) -> Result<Option<String>> {
-        if let Some(pos) = self.writer.lock().unwrap().get_pos(key)? {
+        if let Some(pos) = self.writer.read().unwrap().get_pos(key)? {
             Ok(Some(self.read_value(&pos)?))
         } else {
             Ok(None)
@@ -140,8 +140,7 @@ impl KvWriter {
         }
     }
 
-    fn get_pos(&mut self, key: String) -> Result<Option<ValuePos>> {
-        self.buf_writer.flush()?;
+    fn get_pos(&self, key: String) -> Result<Option<ValuePos>> {
         if let Some(pos) = self.log_index.get(&key) {
             // dbg!((key, pos));
             Ok(Some(pos.clone()))
@@ -161,17 +160,14 @@ impl KvWriter {
     }
 
     fn append_command(&mut self, command: Command) -> Result<()> {
-        let first_file_id = self.first_file_id;
         let bytes = command_to_bytes(&command)?;
         self.buf_writer.write_all(bytes.as_slice())?;
+        self.buf_writer.flush()?;
         let current_size = get_current_pos(&mut self.buf_writer)?;
-        match command {
-            Command::Set(k, _) => {
-                let offset = current_size - bytes.len() as u64;
-                self.log_index
-                    .insert(k, ValuePos::new(self.active_file_id, offset));
-            }
-            _ => {}
+        if let Command::Set(k, _) = command {
+            let offset = current_size - bytes.len() as u64;
+            self.log_index
+                .insert(k, ValuePos::new(self.active_file_id, offset));
         }
         if current_size > CHUNK_SIZE_BYTES as u64 {
             self.buf_writer.flush()?;
@@ -196,10 +192,12 @@ impl KvWriter {
             let file = OpenOptions::new()
                 .read(true)
                 .open(&log_path)
-                .expect(&format!(
-                    "fail to open log {}",
-                    log_path.as_os_str().to_str().unwrap()
-                ));
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "fail to open log {}",
+                        log_path.as_os_str().to_str().unwrap()
+                    )
+                });
 
             let mut buf_reader = BufReader::new(file);
             while let Ok(doc) = Document::from_reader(&mut buf_reader) {
@@ -261,7 +259,7 @@ fn get_current_pos<T: Seek>(file: &mut T) -> Result<u64> {
 fn older_log_paths(log_dir_path: &Path) -> Vec<(FileID, PathBuf)> {
     let mut paths: Vec<_> = std::fs::read_dir(log_dir_path)
         .expect("fail to read data dir")
-        .map(|r| r.expect(&"fail to read data file"))
+        .map(|r| r.expect("fail to read data file"))
         .collect();
 
     paths.sort_by_key(|de| de.path());
@@ -319,11 +317,11 @@ fn build_index(log_dir_path: &Path) -> Result<(HashMap<String, ValuePos>, FileID
     }
 }
 
-fn path_from_id(log_dir_path: &PathBuf, file_id: FileID) -> PathBuf {
+fn path_from_id(log_dir_path: &Path, file_id: FileID) -> PathBuf {
     log_dir_path.join(format!("{}.log", file_id))
 }
 
-fn compact_path_from_id(log_dir_path: &PathBuf, file_id: FileID) -> PathBuf {
+fn compact_path_from_id(log_dir_path: &Path, file_id: FileID) -> PathBuf {
     let mut file_path = path_from_id(log_dir_path, file_id);
     file_path.set_extension(BACKUP_SUFFIX);
     file_path
